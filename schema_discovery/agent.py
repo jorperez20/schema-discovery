@@ -195,6 +195,7 @@ class SchemaDiscoveryAgent:
         SchemaDiscoveryResult
         """
         # ── Load ──────────────────────────────────────────────
+        print(f"[1/5] Loading data from: {source if isinstance(source, str) else 'DataFrame'}")
         if isinstance(source, str):
             df = load(source, **load_kwargs)
             source_name = name or source
@@ -207,18 +208,30 @@ class SchemaDiscoveryAgent:
             )
 
         if len(df) > sample_rows:
+            print(f"      {len(df):,} rows found — sampling {sample_rows:,}")
             df = df.sample(n=sample_rows, random_state=42).reset_index(drop=True)
 
+        print(f"      {len(df):,} rows × {len(df.columns)} columns ready")
+
         # ── Pass 1: lightweight profile → category detection ──
+        print(f"[2/5] Building lightweight profile ({len(df.columns)} columns)...")
         light = lightweight_profile_dataframe(df)
+
+        print(f"[3/5] Pass 1 — asking Gemini to detect column categories...")
         pass1_prompt = self._build_pass1_prompt(light, source_name)
         categories = self._gemini_call(pass1_prompt, _PASS1_SYSTEM)
         category_map = {row["column"]: row["category"] for row in categories}
+        _print_category_summary(category_map)
 
-        # ── Pass 2: targeted stats → deep classification ───────
+        # ── Pass 2: targeted stats → deep classification ──────
+        print(f"[4/5] Pass 2 — computing targeted stats per category...")
         enriched = self._build_enriched_profile(df, light["columns"], category_map)
+
+        print(f"[5/5] Pass 2 — asking Gemini for deep classification...")
         pass2_prompt = self._build_pass2_prompt(enriched, light["shape"], source_name)
         classifications = self._gemini_call(pass2_prompt, _PASS2_SYSTEM)
+
+        print(f"\n      Done. {len(classifications)} columns classified.\n")
 
         return SchemaDiscoveryResult(
             source_name=source_name,
@@ -304,3 +317,13 @@ class SchemaDiscoveryAgent:
                 f"Expected a JSON array from Gemini, got {type(result).__name__}"
             )
         return result
+
+
+def _print_category_summary(category_map: dict) -> None:
+    """Print a compact summary of detected categories."""
+    from collections import Counter
+    counts = Counter(category_map.values())
+    lines = ["      Detected categories:"]
+    for cat, n in sorted(counts.items(), key=lambda x: -x[1]):
+        lines.append(f"        {cat:<25} {n} column{'s' if n > 1 else ''}")
+    print("\n".join(lines))
