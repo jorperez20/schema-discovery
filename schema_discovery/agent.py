@@ -24,7 +24,7 @@ from .loaders import load
 from .profiler import lightweight_profile_dataframe, targeted_profile
 from .result import SchemaDiscoveryResult
 
-DEFAULT_MODEL    = "gemini-2.0-flash"
+DEFAULT_MODEL    = "gemini-2.5-pro"
 DEFAULT_LOCATION = "us-central1"
 
 # ──────────────────────────────────────────────────────────────
