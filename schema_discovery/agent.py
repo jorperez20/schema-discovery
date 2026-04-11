@@ -31,15 +31,29 @@ You will receive a statistical profile of a dataset's columns. For each column y
      "binary_churn_event_flag", "customer_age_years", "product_sku_code",
      "latitude_wgs84", "email_address", "http_status_code", "boolean_is_active"
 
-2. Assign a "category" — one of exactly these 6 broad buckets:
-     - numeric      : any number intended for calculation (amounts, scores, counts, ratios,
-                      rates, durations in seconds, measurements)
-     - temporal     : dates, times, timestamps, datetime strings
-     - categorical  : discrete labels, boolean flags, ordinal levels, status fields,
-                      enumerations — anything with a finite set of meaningful values
-     - textual      : free-form natural language (comments, descriptions, reviews, names)
-     - identifier   : IDs, keys, codes, hashes — used for row identification, not analysis
-     - geographic   : location data (coordinates, country codes, city names, postal codes)
+2. Assign a "category" — one of exactly these 12 categories:
+     - numeric_continuous  : real-valued measurements with no natural upper bound
+                             (height, weight, temperature, distance, duration_seconds)
+     - numeric_discrete    : whole number counts with numeric meaning
+                             (quantity, age_years, visit_count, number_of_items)
+     - numeric_ratio       : proportions, rates, or percentages — values between 0–1 or 0–100
+                             (conversion_rate, accuracy, churn_probability, discount_pct)
+     - numeric_amount      : monetary or financial values
+                             (price, revenue, cost, salary, balance, transaction_value)
+     - temporal            : dates, times, timestamps, or datetime strings
+                             (created_at, birth_date, order_timestamp, event_date)
+     - categorical_nominal : unordered discrete labels with no inherent ranking
+                             (country, status, gender, brand, product_type, channel)
+     - categorical_ordinal : ordered discrete categories with a meaningful rank
+                             (education_level, satisfaction_rating, priority, severity)
+     - boolean             : strictly binary values — true/false, yes/no, 0/1, active/inactive
+     - textual             : free-form natural language — variable length, unstructured
+                             (comments, descriptions, reviews, notes, support_tickets)
+     - identifier          : IDs, keys, codes, or hashes used for row identification, not analysis
+                             (user_id, order_uuid, session_token, product_sku)
+     - geographic          : location data of any granularity
+                             (latitude, longitude, country_code, city, zip_code, address)
+     - unknown             : cannot be determined from the available profile
 
 Respond ONLY with a valid JSON array. Each element must have exactly these keys:
 - "column"       : column name (string, must match exactly)

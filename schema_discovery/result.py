@@ -9,14 +9,19 @@ from __future__ import annotations
 import pandas as pd
 
 _CATEGORY_PALETTE: dict[str, tuple[str, str]] = {
-    # category       bg_color    text_color
-    "numeric":      ("#4E79A7", "#fff"),
-    "temporal":     ("#9C755F", "#fff"),
-    "categorical":  ("#59A14F", "#fff"),
-    "textual":      ("#EDC948", "#333"),
-    "identifier":   ("#BAB0AC", "#333"),
-    "geographic":   ("#86BCB6", "#333"),
-    "unknown":      ("#cccccc", "#333"),
+    # category                bg_color    text_color
+    "numeric_continuous":   ("#4E79A7", "#fff"),
+    "numeric_discrete":     ("#6A9DC8", "#fff"),
+    "numeric_ratio":        ("#B07AA1", "#fff"),
+    "numeric_amount":       ("#F28E2B", "#fff"),
+    "temporal":             ("#9C755F", "#fff"),
+    "categorical_nominal":  ("#59A14F", "#fff"),
+    "categorical_ordinal":  ("#8BC34A", "#fff"),
+    "boolean":              ("#26A69A", "#fff"),
+    "textual":              ("#EDC948", "#333"),
+    "identifier":           ("#BAB0AC", "#333"),
+    "geographic":           ("#86BCB6", "#333"),
+    "unknown":              ("#cccccc", "#333"),
 }
 
 
