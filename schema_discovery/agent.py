@@ -1,5 +1,14 @@
 """
-SchemaDiscoveryAgent: orchestrates data loading, profiling, and Gemini-powered classification.
+SchemaDiscoveryAgent: two-pass Gemini-powered schema discovery.
+
+Pass 1 — Category detection
+    Sends a lightweight profile (dtype, nulls, cardinality, samples) to Gemini.
+    Gemini identifies the broad category of each column.
+
+Pass 2 — Deep classification
+    Uses the category from Pass 1 to compute only the relevant stats per column.
+    Sends the enriched profile back to Gemini for the final classification:
+    refined category, inferred domain, semantic type, and data quality notes.
 """
 from __future__ import annotations
 
@@ -12,63 +21,90 @@ from google import genai
 from google.genai import types as genai_types
 
 from .loaders import load
-from .profiler import profile_dataframe
-from .classifier import pre_classify
+from .profiler import lightweight_profile_dataframe, targeted_profile
 from .result import SchemaDiscoveryResult
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL    = "gemini-2.0-flash"
 DEFAULT_LOCATION = "us-central1"
 
-_SYSTEM_PROMPT = """You are an expert data analyst specializing in data schema discovery.
+# ──────────────────────────────────────────────────────────────
+# Pass 1 prompt: category detection from minimal profile
+# ──────────────────────────────────────────────────────────────
+_PASS1_SYSTEM = """You are a data type classifier.
 
-You will receive a statistical profile of a dataset's columns. For each column you must:
+You will receive a minimal profile of a dataset's columns (dtype, null rate,
+unique count, unique rate, and a few sample values).
 
-1. Freely infer a specific "domain" label — do NOT choose from a fixed list.
-   The domain should be as precise and descriptive as possible, capturing what the data
-   actually represents. Examples of good domain labels:
-     "monthly_recurring_revenue_usd", "unix_epoch_milliseconds", "iso_3166_alpha2_country_code",
-     "net_promoter_score_0_10", "hashed_user_fingerprint", "free_form_support_ticket_text",
-     "binary_churn_event_flag", "customer_age_years", "product_sku_code",
-     "latitude_wgs84", "email_address", "http_status_code", "boolean_is_active"
+Your job is to assign each column to exactly one of these 12 categories:
 
-2. Assign a "category" — one of exactly these 12 categories:
-     - numeric_continuous  : real-valued measurements with no natural upper bound
-                             (height, weight, temperature, distance, duration_seconds)
-     - numeric_discrete    : whole number counts with numeric meaning
-                             (quantity, age_years, visit_count, number_of_items)
-     - numeric_ratio       : proportions, rates, or percentages — values between 0–1 or 0–100
-                             (conversion_rate, accuracy, churn_probability, discount_pct)
-     - numeric_amount      : monetary or financial values
-                             (price, revenue, cost, salary, balance, transaction_value)
-     - temporal            : dates, times, timestamps, or datetime strings
-                             (created_at, birth_date, order_timestamp, event_date)
-     - categorical_nominal : unordered discrete labels with no inherent ranking
-                             (country, status, gender, brand, product_type, channel)
-     - categorical_ordinal : ordered discrete categories with a meaningful rank
-                             (education_level, satisfaction_rating, priority, severity)
-     - boolean             : strictly binary values — true/false, yes/no, 0/1, active/inactive
-     - textual             : free-form natural language — variable length, unstructured
-                             (comments, descriptions, reviews, notes, support_tickets)
-     - identifier          : IDs, keys, codes, or hashes used for row identification, not analysis
-                             (user_id, order_uuid, session_token, product_sku)
-     - geographic          : location data of any granularity
-                             (latitude, longitude, country_code, city, zip_code, address)
-     - unknown             : cannot be determined from the available profile
+  numeric_continuous  — real-valued measurements (height, temperature, distance)
+  numeric_discrete    — whole number counts (quantity, age, visit_count)
+  numeric_ratio       — proportions/rates between 0–1 or 0–100 (accuracy, churn_rate)
+  numeric_amount      — monetary or financial values (price, revenue, salary)
+  temporal            — dates, times, timestamps, datetime strings
+  categorical_nominal — unordered discrete labels (country, status, brand)
+  categorical_ordinal — ordered discrete categories (rating, priority, education_level)
+  boolean             — binary values only (true/false, yes/no, 0/1)
+  textual             — free-form natural language (comments, descriptions, reviews)
+  identifier          — IDs, keys, hashes — for row identification, not analysis
+  geographic          — location data (lat/lon, city, zip_code, country_code)
+  unknown             — cannot be determined from available information
+
+Respond ONLY with a valid JSON array. Each element must have exactly two keys:
+- "column"   : column name (string, must match exactly)
+- "category" : one of the 12 category labels above (string)
+
+Return the array and nothing else."""
+
+
+# ──────────────────────────────────────────────────────────────
+# Pass 2 prompt: deep classification with targeted stats
+# ──────────────────────────────────────────────────────────────
+_PASS2_SYSTEM = """You are an expert data analyst specializing in data schema discovery.
+
+You will receive an enriched profile of a dataset's columns. Each column includes:
+- A suggested category from a previous analysis step
+- Targeted statistics computed specifically for that category
+- Sample values
+
+Your job for each column:
+
+1. Confirm or refine the suggested category if the enriched stats reveal something different.
+   Use the same 12 categories:
+     numeric_continuous | numeric_discrete | numeric_ratio | numeric_amount |
+     temporal | categorical_nominal | categorical_ordinal | boolean |
+     textual | identifier | geographic | unknown
+
+2. Freely infer a specific "domain" label — do NOT choose from a fixed list.
+   Be as precise and descriptive as possible. Examples:
+     "monthly_recurring_revenue_usd", "unix_epoch_milliseconds",
+     "iso_3166_alpha2_country_code", "net_promoter_score_0_10",
+     "hashed_user_fingerprint", "free_form_support_ticket_text",
+     "binary_churn_event_flag", "customer_age_years", "product_sku_code"
+
+3. Write a short "semantic_type" — a human-readable phrase for what this column represents.
+
+4. Add "notes" for any data quality issues, anomalies, or important patterns you observe.
+   Examples: high null rate, suspicious outliers, mixed formats, unexpected negatives.
+   Set to null if nothing notable.
 
 Respond ONLY with a valid JSON array. Each element must have exactly these keys:
 - "column"       : column name (string, must match exactly)
-- "category"     : one of the 6 category labels above (string)
-- "domain"       : your freely inferred specific domain label (string, snake_case)
-- "semantic_type": a short human-readable phrase describing what this column represents
-- "notes"        : data quality observations, anomalies, or important patterns — or null
+- "category"     : confirmed or refined category (string)
+- "domain"       : your freely inferred domain label in snake_case (string)
+- "semantic_type": short human-readable description (string)
+- "notes"        : data quality observations or null
 
-Use the statistical hints as soft signals, but apply your own domain expertise.
-Return the JSON array and nothing else."""
+Return the array and nothing else."""
 
 
 class SchemaDiscoveryAgent:
     """
     Discovers the schema, data types, and column domains of a dataset using Google Gemini.
+
+    Uses a two-pass approach:
+      - Pass 1: lightweight profile → Gemini detects column categories
+      - Pass 2: targeted stats per category → Gemini produces deep classification
 
     Authentication — two modes:
 
@@ -87,8 +123,8 @@ class SchemaDiscoveryAgent:
     Parameters
     ----------
     project : str, optional
-        GCP project ID. When provided, uses Vertex AI (ADC auth). Takes priority over api_key.
-        Falls back to the ``GOOGLE_CLOUD_PROJECT`` or ``GCLOUD_PROJECT`` environment variable.
+        GCP project ID. When provided, uses Vertex AI (ADC auth).
+        Falls back to ``GOOGLE_CLOUD_PROJECT`` or ``GCLOUD_PROJECT`` env vars.
     location : str
         Vertex AI region. Defaults to ``us-central1``.
     api_key : str, optional
@@ -106,7 +142,6 @@ class SchemaDiscoveryAgent:
     ):
         self._model = model
 
-        # Resolve GCP project from env if not passed explicitly
         resolved_project = (
             project
             or os.environ.get("GOOGLE_CLOUD_PROJECT")
@@ -114,14 +149,12 @@ class SchemaDiscoveryAgent:
         )
 
         if resolved_project:
-            # Vertex AI mode — ADC handles auth automatically on GCP VMs
             self._client = genai.Client(
                 vertexai=True,
                 project=resolved_project,
                 location=location,
             )
         else:
-            # Gemini API mode — requires an API key
             key = api_key or os.environ.get("GEMINI_API_KEY")
             if not key:
                 raise ValueError(
@@ -131,6 +164,10 @@ class SchemaDiscoveryAgent:
                 )
             self._client = genai.Client(api_key=key)
 
+    # ──────────────────────────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────────────────────────
+
     def discover(
         self,
         source: Union[str, pd.DataFrame],
@@ -139,7 +176,7 @@ class SchemaDiscoveryAgent:
         **load_kwargs,
     ) -> SchemaDiscoveryResult:
         """
-        Run schema discovery on a file path or DataFrame.
+        Run two-pass schema discovery on a file path or DataFrame.
 
         Parameters
         ----------
@@ -148,16 +185,16 @@ class SchemaDiscoveryAgent:
         name : str, optional
             Display name for the dataset. Inferred from file path if not provided.
         sample_rows : int
-            Maximum rows to profile (random sample if dataset is larger).
+            Maximum rows to profile. Random sample taken if dataset is larger.
         **load_kwargs
-            Additional keyword arguments forwarded to the file loader
-            (e.g. ``sep="|"`` for CSV, ``sheet_name="Sheet2"`` for Excel).
+            Extra arguments forwarded to the file loader
+            (e.g. sep="|" for CSV, sheet_name="Sales" for Excel).
 
         Returns
         -------
         SchemaDiscoveryResult
         """
-        # --- Load ---
+        # ── Load ──────────────────────────────────────────────
         if isinstance(source, str):
             df = load(source, **load_kwargs)
             source_name = name or source
@@ -165,70 +202,97 @@ class SchemaDiscoveryAgent:
             df = source.copy()
             source_name = name or "DataFrame"
         else:
-            raise TypeError(f"source must be a file path (str) or pd.DataFrame, got {type(source)}")
+            raise TypeError(
+                f"source must be a file path (str) or pd.DataFrame, got {type(source)}"
+            )
 
-        # --- Sample ---
         if len(df) > sample_rows:
             df = df.sample(n=sample_rows, random_state=42).reset_index(drop=True)
 
-        # --- Profile ---
-        profile = profile_dataframe(df)
+        # ── Pass 1: lightweight profile → category detection ──
+        light = lightweight_profile_dataframe(df)
+        pass1_prompt = self._build_pass1_prompt(light, source_name)
+        categories = self._gemini_call(pass1_prompt, _PASS1_SYSTEM)
+        category_map = {row["column"]: row["category"] for row in categories}
 
-        # --- Pre-classify (rule-based hints) ---
-        hints = {
-            col: pre_classify(col, p)
-            for col, p in profile["columns"].items()
-        }
-
-        # --- Classify with Gemini ---
-        prompt = self._build_prompt(profile, hints, source_name)
-        classifications = self._call_gemini(prompt)
+        # ── Pass 2: targeted stats → deep classification ───────
+        enriched = self._build_enriched_profile(df, light["columns"], category_map)
+        pass2_prompt = self._build_pass2_prompt(enriched, light["shape"], source_name)
+        classifications = self._gemini_call(pass2_prompt, _PASS2_SYSTEM)
 
         return SchemaDiscoveryResult(
             source_name=source_name,
-            shape=profile["shape"],
-            profile=profile["columns"],
+            shape=light["shape"],
+            profile=light["columns"],
             classifications=classifications,
         )
 
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────
     # Private helpers
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────
 
-    def _build_prompt(self, profile: dict, hints: dict, dataset_name: str) -> str:
+    def _build_pass1_prompt(self, light: dict, dataset_name: str) -> str:
         lines = [
             f"Dataset: {dataset_name}",
-            f"Shape: {profile['shape']['rows']:,} rows × {profile['shape']['columns']} columns",
+            f"Shape: {light['shape']['rows']:,} rows × {light['shape']['columns']} columns",
             "",
-            "Column profiles:",
+            "Column profiles (minimal):",
         ]
-        for col, p in profile["columns"].items():
-            hint = hints.get(col)
-            hint_str = f"  [hint: {hint}]" if hint else ""
-            # Exclude verbose/redundant keys for the prompt
-            exclude = {"sample_values", "looks_like_dates"}
+        for col, p in light["columns"].items():
+            lines.append(f'\n  Column: "{col}"')
+            lines.append(f"  {json.dumps(p, default=str)}")
+        return "\n".join(lines)
+
+    def _build_enriched_profile(
+        self,
+        df: pd.DataFrame,
+        light_columns: dict,
+        category_map: dict,
+    ) -> dict:
+        """
+        For each column, merge the lightweight profile with targeted stats
+        computed based on the category Gemini assigned in Pass 1.
+        """
+        enriched = {}
+        for col in df.columns:
+            category = category_map.get(col, "unknown")
+            extra = targeted_profile(df[col], category)
+            enriched[col] = {
+                "suggested_category": category,
+                **light_columns[col],
+                **extra,
+            }
+        return enriched
+
+    def _build_pass2_prompt(self, enriched: dict, shape: dict, dataset_name: str) -> str:
+        lines = [
+            f"Dataset: {dataset_name}",
+            f"Shape: {shape['rows']:,} rows × {shape['columns']} columns",
+            "",
+            "Enriched column profiles:",
+        ]
+        for col, p in enriched.items():
+            exclude = {"sample_values"}
             stats = {k: v for k, v in p.items() if k not in exclude and v is not None}
             samples = p.get("sample_values", [])
-            lines.append(f'\n  Column: "{col}"{hint_str}')
-            lines.append(f"  Stats:  {json.dumps(stats, default=str)}")
+            lines.append(f'\n  Column: "{col}"')
+            lines.append(f"  Profile: {json.dumps(stats, default=str)}")
             lines.append(f"  Sample values: {samples}")
         return "\n".join(lines)
 
-    def _call_gemini(self, prompt: str) -> list[dict]:
+    def _gemini_call(self, prompt: str, system_prompt: str) -> list[dict]:
         response = self._client.models.generate_content(
             model=self._model,
             contents=prompt,
             config=genai_types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 response_mime_type="application/json",
                 temperature=0.1,
             ),
         )
         raw = response.text.strip()
-        # Strip markdown fences if the model wraps the output
         if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            raw = raw.rsplit("```", 1)[0].strip()
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         try:
             result = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -237,6 +301,6 @@ class SchemaDiscoveryAgent:
             ) from exc
         if not isinstance(result, list):
             raise ValueError(
-                f"Expected a JSON array from Gemini, got: {type(result).__name__}"
+                f"Expected a JSON array from Gemini, got {type(result).__name__}"
             )
         return result
