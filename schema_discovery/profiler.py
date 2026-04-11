@@ -137,7 +137,7 @@ def _compute_group(series: pd.Series, group: str) -> dict:
         s = series.dropna()
         if pd.api.types.is_object_dtype(series):
             try:
-                s = pd.to_datetime(s, infer_datetime_format=True, errors="coerce").dropna()
+                s = pd.to_datetime(s, errors="coerce").dropna()
             except Exception:
                 pass
         if pd.api.types.is_datetime64_any_dtype(s) and len(s) > 0:
