@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Environments
+.env
+.venv
+env/
+venv/
+.python-version
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data files (don't commit raw data)
+*.csv
+*.parquet
+*.xlsx
+*.xls
+*.json
+*.tsv
+*.feather
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Credentials / secrets
+*.key
+*.pem
+*.env
